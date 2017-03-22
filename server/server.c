@@ -125,6 +125,7 @@ int server_read_msg(server_t *srv, int id)
 		close(srv->clients[id]->fd);
 		client_del(srv->clients[id]);
 		srv->clients[id] = NULL;
+		srv->num_clients--;
 		return 0;
 	}
 	buf[n] = 0;
