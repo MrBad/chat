@@ -7,8 +7,11 @@
 #include <arpa/inet.h>
 #include <sys/select.h>
 #include <errno.h>
+#include <ctype.h>
 #include "client.h"
 #include "server.h"
+#include "msg.h"
+
 
 static int server_listen(server_t *srv) 
 {
@@ -94,7 +97,7 @@ int server_accept(server_t *srv)
 	socklen_t addr_len = sizeof(caddr);
 	client_t *cli;
 	int fd;
-	
+
 	if((fd = accept(srv->fd, (struct sockaddr*)&caddr, &addr_len)) < 0) {
 		perror("accept");
 		return -1;
@@ -108,16 +111,105 @@ int server_accept(server_t *srv)
 	return 0;
 }
 
+int trim(char *str)
+{
+	int len;
+	if(!str)
+		return -1;
+	len = strlen(str);
+	while(len > 0 && isspace(str[len-1]))
+		str[--len] = 0;
+	return 0;
+}
+
+
+void change_nick(server_t *srv, int id, char *nick) 
+{
+	int i, found, len;
+	char buf[1024], old_nick[32];
+	memset(old_nick, 0, sizeof(old_nick));
+	for(i = 0, found = 0; i < srv->clisz; i++) {
+		if(!srv->clients[i] || i == id) continue;
+		if(strcmp(srv->clients[i]->nick, nick) == 0) {
+			found = 1;
+			break;
+		}
+	}
+
+	if(found) {
+		printf("nick %s exists\n", nick);
+		len = snprintf(buf, sizeof(buf), "%d: %s\n", NICK_INUSE, nick);
+		write(srv->clients[id]->fd, buf, len);
+	} 
+	else {
+		if(srv->clients[id]->nick[0])
+			strncpy(old_nick, srv->clients[id]->nick, sizeof(old_nick));
+
+		strncpy(srv->clients[id]->nick, nick, sizeof(srv->clients[id]->nick)-1);
+		len = snprintf(buf, sizeof(buf), "%d: %s\n", NICK_CHANGED, nick);
+		write(srv->clients[id]->fd, buf, len);	
+		
+		if(old_nick[0]) {
+			len = snprintf(buf, sizeof(buf), "%d: %s changed nick to %s\n", SRV_MSG, 
+					old_nick, nick);
+		} 
+		else {
+			len = snprintf(buf, sizeof(buf), "%d: %s joined chat\n", SRV_MSG, nick);
+		}
+		printf("%s", buf);
+		for(i = 0; i < srv->clisz; i++) {
+			if(!srv->clients[i] || i == id) 
+				continue;
+			write(srv->clients[i]->fd, buf, len);
+		}
+	}
+}
+
+void bcast_msg(server_t *srv, int id, char *msg) 
+{
+	int i, len; 
+	char buf[1024];
+	
+	len = snprintf(buf, sizeof(buf), "%d: %s: %s\n", BCAST_MSG, srv->clients[id]->nick, msg);
+	
+	for(i = 0; i < srv->clisz; i++) {
+		if(srv->clients[i])
+			write(srv->clients[i]->fd, buf, len);
+	}
+}
+
+void client_close(server_t *srv, int id) 
+{
+	int i, len;
+	char buf[1024];
+	struct sockaddr_in caddr;
+	socklen_t addr_len = sizeof(caddr);
+
+	if(getpeername(srv->clients[id]->fd, (struct sockaddr*)&caddr, &addr_len) == 0) 
+		printf("Client %s - %s:%d closed connection\n", srv->clients[id]->nick,
+				inet_ntoa(caddr.sin_addr), ntohs(caddr.sin_port));
+	len = snprintf(buf, sizeof(buf), "%d: %s left the chat\n", 
+			SRV_MSG, srv->clients[id]->nick);
+	for(i = 0; i < srv->clisz; i++)
+		if(srv->clients[i])
+			write(srv->clients[i]->fd, buf, len);
+	close(srv->clients[id]->fd);
+	client_del(srv->clients[id]);
+	srv->clients[id] = NULL;
+	srv->num_clients--;
+}
+
 int server_read_msg(server_t *srv, int id) 
 {
-	char buf[1024];
-	int n, i;
+	char buf[1024], *msg;
+	int n, type;
 	if((n = read(srv->clients[id]->fd, buf, sizeof(buf)-1)) < 0) {
 		perror("read");
 		return -1; // ??? or kill client //		
 	} 
 	else if(n == 0) {
-		struct sockaddr_in caddr;
+		client_close(srv, id);
+/*		struct sockaddr_in caddr;
 		socklen_t addr_len = sizeof(caddr);
 		if(getpeername(srv->clients[id]->fd,(struct sockaddr*)&caddr, &addr_len) == 0)
 			printf("Client %s: %d closed connection\n",
@@ -126,12 +218,34 @@ int server_read_msg(server_t *srv, int id)
 		client_del(srv->clients[id]);
 		srv->clients[id] = NULL;
 		srv->num_clients--;
+*/
 		return 0;
 	}
 	buf[n] = 0;
-	for(i = 0; i < srv->clisz; i++)
-		if(srv->clients[i])
-			write(srv->clients[i]->fd, buf, strlen(buf));
+
+	type = atoi(buf);
+	if(!(msg = strchr(buf, ':'))) {
+		fprintf(stderr, "malformed message: %s\n", buf);
+		return -1;
+	}
+	msg+=2; 
+	trim(msg);
+	
+
+	switch(type) {
+		case CHANGE_NICK:	
+			change_nick(srv, id, msg);
+			break;
+
+		case BCAST_MSG:
+			bcast_msg(srv, id, msg);
+			break;
+
+		default:
+			printf("Unknown type: %d\n", type);
+			break;
+	}
+
 	return 0;
 }
 

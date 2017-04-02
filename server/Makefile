@@ -1,5 +1,5 @@
 #DFLAGS=
-INCLUDE=.
+INCLUDE=..
 LIBS=
 CC=gcc
 OFLAGS=-c
